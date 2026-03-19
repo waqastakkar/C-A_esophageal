@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 from typing import Iterable
 
 import numpy as np
@@ -131,7 +132,12 @@ def add_harmonized_identifier(df: pd.DataFrame, id_column: str) -> pd.DataFrame:
     return result
 
 
+def is_unnamed_column(column_name: object) -> bool:
+    return bool(re.match(r"^unnamed:\s*\d+$", str(column_name).strip(), flags=re.IGNORECASE))
+
+
 def detect_identifier(dfs: Iterable[pd.DataFrame], user_choice: str | None = None) -> str:
+    dfs = tuple(dfs)
     if user_choice:
         missing = [idx for idx, df in enumerate(dfs, start=1) if user_choice not in df.columns]
         if missing:
@@ -139,13 +145,14 @@ def detect_identifier(dfs: Iterable[pd.DataFrame], user_choice: str | None = Non
         return user_choice
 
     shared = set.intersection(*(set(df.columns) for df in dfs))
+    valid_shared = {col for col in shared if not is_unnamed_column(col)}
     for candidate in DEFAULT_ID_CANDIDATES:
-        if candidate in shared:
+        if candidate in valid_shared:
             return candidate
-    if len(shared) == 1:
-        return next(iter(shared))
+    if len(valid_shared) == 1:
+        return next(iter(valid_shared))
     raise KeyError(
-        "Unable to auto-detect a common identifier column. "
+        "Unable to auto-detect a common identifier column after excluding index-like columns. "
         f"Shared columns were: {sorted(shared)}. Use --id-column explicitly."
     )
 
@@ -326,9 +333,20 @@ def split_train_test(
     test_size: float,
     random_state: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if df.empty:
+        raise ValueError(
+            "No samples remain after merging and filtering, so train/test splits cannot be created. "
+            "Check the identifier column selection and the unmatched-ID diagnostics."
+        )
+
     feature_cols = [col for col in df.columns if col not in {id_column, "_harmonized_id", label_column}]
     X = df[[id_column, "_harmonized_id"] + feature_cols].copy()
     y = df[[id_column, "_harmonized_id", label_column]].copy()
+
+    if len(df) < 2:
+        raise ValueError(
+            f"At least 2 merged samples are required for train/test splitting, but only {len(df)} sample remains."
+        )
 
     stratify = None
     label_non_missing = y[label_column].dropna()
