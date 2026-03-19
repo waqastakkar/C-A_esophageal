@@ -5,22 +5,29 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import re
-from typing import Iterable
+from typing import Iterable, NamedTuple
 
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
 DEFAULT_ID_CANDIDATES = (
+    "barcode",
+    "sample_submitter_id",
+    "bcr_patient_barcode",
+    "submitter_id",
+    "patient",
+    "sample_id",
     "patient_id",
     "patientid",
-    "sample_id",
     "sampleid",
     "case_id",
-    "submitter_id",
-    "bcr_patient_barcode",
-    "barcode",
 )
+
+TCGA_IDENTIFIER_PRIORITY = DEFAULT_ID_CANDIDATES
+TCGA_BARCODE_COLUMNS = ("barcode", "sample_submitter_id", "submitter_id", "bcr_patient_barcode", "patient")
+HARMONIZED_ID_COLUMNS = {"_harmonized_id", "_harmonized_sample_id", "_harmonized_patient_id"}
+
 DEFAULT_LABEL_CANDIDATES = (
     "vital_status",
     "survival_status",
@@ -117,54 +124,100 @@ def normalize_identifier_value(value: object) -> str | None:
     text = str(value).strip()
     if not text:
         return None
-    normalized = text.replace(".", "-").upper()
-    if normalized.startswith("TCGA-"):
-        parts = normalized.split("-")
-        if len(parts) >= 3:
-            normalized = "-".join(parts[:3])
-    return normalized
+    return text.replace(".", "-").upper()
+
+
+def tcga_identifier_variants(value: object) -> dict[str, str | None]:
+    normalized = normalize_identifier_value(value)
+    variants: dict[str, str | None] = {
+        "full": normalized,
+        "sample": None,
+        "patient": None,
+    }
+    if not normalized or not normalized.startswith("TCGA-"):
+        return variants
+
+    parts = normalized.split("-")
+    if len(parts) >= 4:
+        variants["sample"] = "-".join(parts[:4])
+    if len(parts) >= 3:
+        variants["patient"] = "-".join(parts[:3])
+    return variants
+
+
+class DuplicateColumnResolution(NamedTuple):
+    dataframe: pd.DataFrame
+    duplicate_columns: int
+    conflicting_columns: int
+    ignored_conflicts: list[str]
+
+
+def resolve_duplicate_columns(df: pd.DataFrame, preferred_columns: Iterable[str] = ()) -> DuplicateColumnResolution:
+    result = df.copy()
+    duplicate_columns = 0
+    conflicting_columns = 0
+    ignored_conflicts: list[str] = []
+
+    for column_name in pd.unique(result.columns[result.columns.duplicated(keep=False)]):
+        positions = [idx for idx, col in enumerate(result.columns) if col == column_name]
+        if len(positions) < 2:
+            continue
+        duplicate_columns += len(positions) - 1
+        duplicate_frame = result.iloc[:, positions].astype("string")
+        normalized = duplicate_frame.applymap(normalize_identifier_value)
+        comparable = normalized.fillna(duplicate_frame.apply(lambda col: col.str.strip(), axis=0))
+        conflicting_rows = comparable.nunique(axis=1, dropna=True) > 1
+        conflicting = bool(conflicting_rows.any())
+        if conflicting:
+            conflicting_columns += 1
+            if column_name in set(preferred_columns):
+                ignored_conflicts.append(column_name)
+                print(
+                    f"Warning: duplicate column '{column_name}' has conflicting values in "
+                    f"{int(conflicting_rows.sum())} rows; keeping the first occurrence because it is preferred for TCGA merging."
+                )
+            else:
+                print(
+                    f"Warning: duplicate column '{column_name}' has conflicting values in "
+                    f"{int(conflicting_rows.sum())} rows; keeping the first occurrence and ignoring the rest."
+                )
+        else:
+            print(
+                f"Resolved {len(positions)} duplicated '{column_name}' columns by dropping identical copies."
+            )
+
+        kept = duplicate_frame.bfill(axis=1).iloc[:, 0].astype("string")
+        result.iloc[:, positions[0]] = kept
+        keep_mask = np.ones(len(result.columns), dtype=bool)
+        keep_mask[positions[1:]] = False
+        result = result.loc[:, keep_mask].copy()
+
+    return DuplicateColumnResolution(result, duplicate_columns, conflicting_columns, ignored_conflicts)
 
 
 def ensure_unique_identifier_column(df: pd.DataFrame, id_column: str) -> pd.DataFrame:
-    result = df.copy()
+    resolution = resolve_duplicate_columns(df, preferred_columns=TCGA_IDENTIFIER_PRIORITY)
+    result = resolution.dataframe
     matching_positions = [idx for idx, col in enumerate(result.columns) if col == id_column]
     if not matching_positions:
         raise KeyError(f"Identifier column '{id_column}' not found.")
 
     identifier_values = result.iloc[:, matching_positions].astype("string")
-    if len(matching_positions) == 1:
-        result.iloc[:, matching_positions[0]] = identifier_values.iloc[:, 0]
-        return result
-
-    rowwise_unique = identifier_values.apply(
-        lambda row: {
-            normalized if normalized is not None else str(value).strip()
-            for value in row.dropna()
-            if str(value).strip()
-            for normalized in [normalize_identifier_value(value)]
-        },
-        axis=1,
-    )
-    conflicting_rows = rowwise_unique.map(len) > 1
-    if conflicting_rows.any():
-        raise ValueError(
-            f"Identifier column '{id_column}' appears multiple times with conflicting values in "
-            f"{int(conflicting_rows.sum())} rows. Remove duplicate identifier columns from the input data."
-        )
-
     resolved_identifier = identifier_values.bfill(axis=1).iloc[:, 0].astype("string")
-    keep_mask = ~result.columns.duplicated(keep="first")
-    result = result.loc[:, keep_mask].copy()
-    result.iloc[:, result.columns.get_loc(id_column)] = resolved_identifier
-    print(
-        f"Resolved {len(matching_positions)} duplicated '{id_column}' columns by keeping the first non-missing value per row."
-    )
+    result.iloc[:, matching_positions[0]] = resolved_identifier
+    if len(matching_positions) > 1:
+        keep_mask = np.ones(len(result.columns), dtype=bool)
+        keep_mask[matching_positions[1:]] = False
+        result = result.loc[:, keep_mask].copy()
     return result
 
 
-def add_harmonized_identifier(df: pd.DataFrame, id_column: str) -> pd.DataFrame:
+def add_harmonized_identifiers(df: pd.DataFrame, id_column: str) -> pd.DataFrame:
     result = ensure_unique_identifier_column(df, id_column)
-    result["_harmonized_id"] = result[id_column].map(normalize_identifier_value).astype("string")
+    variants = result[id_column].map(tcga_identifier_variants)
+    result["_harmonized_id"] = variants.map(lambda item: item["full"]).astype("string")
+    result["_harmonized_sample_id"] = variants.map(lambda item: item["sample"]).astype("string")
+    result["_harmonized_patient_id"] = variants.map(lambda item: item["patient"]).astype("string")
     return result
 
 
@@ -183,7 +236,7 @@ def maybe_transpose_expression_table(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     transposed = df.set_index(first_column).transpose().reset_index()
-    transposed = transposed.rename(columns={"index": "sample_id"})
+    transposed = transposed.rename(columns={"index": "barcode"})
     transposed.columns = [str(col).strip() for col in transposed.columns]
     print(
         "Detected gene-by-sample expression matrix; transposed to sample-by-gene format "
@@ -193,13 +246,27 @@ def maybe_transpose_expression_table(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def canonicalize_sample_identifier_column(df: pd.DataFrame) -> pd.DataFrame:
-    result = df.copy()
-    for column in result.columns:
-        if column == 'sample_id':
+    resolution = resolve_duplicate_columns(df, preferred_columns=TCGA_IDENTIFIER_PRIORITY)
+    result = resolution.dataframe
+    has_sample_id = "sample_id" in result.columns
+    has_barcode = "barcode" in result.columns
+
+    if has_sample_id and has_barcode:
+        print(
+            "Warning: both 'sample_id' and 'barcode' are present. "
+            "For TCGA expression merging, 'sample_id' is likely UUID-based metadata and 'barcode' will be preferred."
+        )
+
+    for preferred_name in TCGA_IDENTIFIER_PRIORITY:
+        if preferred_name in result.columns:
             return result
+
+    for column in result.columns:
         if is_unnamed_column(column) and looks_like_identifier_series(result[column]):
-            result = result.rename(columns={column: 'sample_id'})
-            print(f"Renamed '{column}' to 'sample_id' based on TCGA-style identifier values.")
+            target_name = "barcode" if not has_barcode else column
+            if target_name != column:
+                result = result.rename(columns={column: target_name})
+                print(f"Renamed '{column}' to '{target_name}' based on TCGA-style identifier values.")
             return result
     return result
 
@@ -244,7 +311,7 @@ def detect_identifier(dfs: Iterable[pd.DataFrame], user_choice: str | None = Non
 
     shared = set.intersection(*(set(df.columns) for df in dfs))
     valid_shared = {col for col in shared if not is_unnamed_column(col)}
-    for candidate in DEFAULT_ID_CANDIDATES:
+    for candidate in TCGA_IDENTIFIER_PRIORITY:
         if candidate in valid_shared:
             return candidate
     if len(valid_shared) == 1:
@@ -266,6 +333,61 @@ def detect_identifier(dfs: Iterable[pd.DataFrame], user_choice: str | None = Non
     )
 
 
+def log_duplicate_column_summary(dataset_name: str, resolution: DuplicateColumnResolution) -> None:
+    print(
+        f"{dataset_name}: found {resolution.duplicate_columns} duplicate columns; "
+        f"conflicting duplicates ignored: {resolution.conflicting_columns}."
+    )
+    if resolution.ignored_conflicts:
+        print(f"{dataset_name}: conflicting preferred identifier columns ignored: {sorted(set(resolution.ignored_conflicts))}")
+
+
+def merge_expression_with_metadata(
+    expression_df: pd.DataFrame,
+    metadata_df: pd.DataFrame,
+    id_column: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str, int]:
+    strategies = [
+        ("exact barcode match", "_harmonized_id", "_harmonized_id"),
+        ("sample barcode match", "_harmonized_sample_id", "_harmonized_sample_id"),
+    ]
+    if id_column in {"patient", "bcr_patient_barcode", "patient_id", "patientid"}:
+        strategies.append(("patient barcode fallback", "_harmonized_patient_id", "_harmonized_patient_id"))
+
+    for strategy_name, expression_key, metadata_key in strategies:
+        left = expression_df[expression_key].dropna()
+        right = metadata_df[metadata_key].dropna()
+        if left.empty or right.empty:
+            continue
+        matchable = int(left.isin(set(right)).sum())
+        if matchable == 0:
+            continue
+
+        unmatched_expression_ids = expression_df.loc[
+            ~expression_df[expression_key].isin(set(right)), [id_column, expression_key]
+        ].copy()
+        unmatched_metadata_ids = metadata_df.loc[
+            ~metadata_df[metadata_key].isin(set(left)), [id_column, metadata_key]
+        ].copy()
+
+        merged_df = expression_df.merge(
+            metadata_df.drop(columns=[id_column]),
+            left_on=expression_key,
+            right_on=metadata_key,
+            how="inner",
+            validate="one_to_one",
+            suffixes=("", "_metadata"),
+        )
+        merged_df = merged_df.rename(columns={f"{expression_key}_x": expression_key}) if f"{expression_key}_x" in merged_df.columns else merged_df
+        if id_column not in merged_df.columns:
+            merged_df[id_column] = merged_df[expression_key]
+        return merged_df, unmatched_expression_ids, unmatched_metadata_ids, strategy_name, matchable
+
+    raise ValueError(
+        "Unable to merge expression and metadata tables with exact barcode, sample-level harmonization, or patient-level fallback."
+    )
+
+
 def detect_label_column(df: pd.DataFrame, id_column: str, user_choice: str | None) -> str:
     if user_choice:
         if user_choice not in df.columns:
@@ -280,7 +402,7 @@ def detect_label_column(df: pd.DataFrame, id_column: str, user_choice: str | Non
             if not non_missing.empty and non_missing.nunique() > 1:
                 return candidate
 
-    fallback = [col for col in df.columns if col not in {id_column, "_harmonized_id"} and df[col].dropna().nunique() > 1]
+    fallback = [col for col in df.columns if col not in ({id_column} | HARMONIZED_ID_COLUMNS) and df[col].dropna().nunique() > 1]
     if not fallback:
         raise ValueError("Unable to detect a usable label column. Provide --label-column explicitly.")
     return fallback[0]
@@ -315,7 +437,7 @@ def summarize_missing_by_column(df: pd.DataFrame, dataset_name: str) -> pd.DataF
 
 def clean_metadata(df: pd.DataFrame, id_column: str, missing_threshold: float) -> tuple[pd.DataFrame, pd.DataFrame]:
     result = df.copy()
-    clinical_cols = [col for col in result.columns if col not in {id_column, "_harmonized_id"}]
+    clinical_cols = [col for col in result.columns if col not in ({id_column} | HARMONIZED_ID_COLUMNS)]
     if not clinical_cols:
         empty_summary = pd.DataFrame(columns=["column", "strategy", "filled_values", "dropped_rows"])
         return result, empty_summary
@@ -425,7 +547,7 @@ def remove_outliers(df: pd.DataFrame, gene_cols: list[str], z_threshold: float) 
 
 def encode_metadata_features(df: pd.DataFrame, id_column: str, label_column: str, gene_cols: list[str]) -> tuple[pd.DataFrame, list[str]]:
     metadata_feature_cols = [
-        col for col in df.columns if col not in set(gene_cols) | {id_column, "_harmonized_id", label_column}
+        col for col in df.columns if col not in set(gene_cols) | HARMONIZED_ID_COLUMNS | {id_column, label_column}
     ]
     if not metadata_feature_cols:
         return df.copy(), []
@@ -448,7 +570,7 @@ def split_train_test(
             "Check the identifier column selection and the unmatched-ID diagnostics."
         )
 
-    feature_cols = [col for col in df.columns if col not in {id_column, "_harmonized_id", label_column}]
+    feature_cols = [col for col in df.columns if col not in HARMONIZED_ID_COLUMNS | {id_column, label_column}]
     X = df[[id_column, "_harmonized_id"] + feature_cols].copy()
     y = df[[id_column, "_harmonized_id", label_column]].copy()
 
@@ -482,23 +604,30 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    counts_df = canonicalize_sample_identifier_column(
-        maybe_transpose_expression_table(normalize_column_names(load_csv(args.counts)))
-    )
-    metadata_df = canonicalize_sample_identifier_column(normalize_column_names(load_csv(args.metadata)))
-    normalized_df = canonicalize_sample_identifier_column(
-        maybe_transpose_expression_table(normalize_column_names(load_csv(args.normalized)))
-    )
+    counts_df = maybe_transpose_expression_table(normalize_column_names(load_csv(args.counts)))
+    metadata_df = normalize_column_names(load_csv(args.metadata))
+    normalized_df = maybe_transpose_expression_table(normalize_column_names(load_csv(args.normalized)))
+
+    counts_resolution = resolve_duplicate_columns(counts_df, preferred_columns=TCGA_IDENTIFIER_PRIORITY)
+    metadata_resolution = resolve_duplicate_columns(metadata_df, preferred_columns=TCGA_IDENTIFIER_PRIORITY)
+    normalized_resolution = resolve_duplicate_columns(normalized_df, preferred_columns=TCGA_IDENTIFIER_PRIORITY)
+    log_duplicate_column_summary("counts", counts_resolution)
+    log_duplicate_column_summary("metadata", metadata_resolution)
+    log_duplicate_column_summary("normalized", normalized_resolution)
+
+    counts_df = canonicalize_sample_identifier_column(counts_resolution.dataframe)
+    metadata_df = canonicalize_sample_identifier_column(metadata_resolution.dataframe)
+    normalized_df = canonicalize_sample_identifier_column(normalized_resolution.dataframe)
 
     id_column = detect_identifier((counts_df, metadata_df, normalized_df), args.id_column)
-    print(f"\nUsing common identifier column: {id_column}")
+    print(f"\nSelected merge key: {id_column}")
 
-    counts_df = add_harmonized_identifier(counts_df.drop_duplicates(subset=id_column), id_column)
-    metadata_df = add_harmonized_identifier(metadata_df.drop_duplicates(subset=id_column), id_column)
-    normalized_df = add_harmonized_identifier(normalized_df.drop_duplicates(subset=id_column), id_column)
+    counts_df = add_harmonized_identifiers(counts_df.drop_duplicates(subset=id_column), id_column)
+    metadata_df = add_harmonized_identifiers(metadata_df.drop_duplicates(subset=id_column), id_column)
+    normalized_df = add_harmonized_identifiers(normalized_df.drop_duplicates(subset=id_column), id_column)
 
-    counts_gene_cols, _ = split_expression_columns(counts_df.drop(columns=["_harmonized_id"]), id_column)
-    normalized_gene_cols, _ = split_expression_columns(normalized_df.drop(columns=["_harmonized_id"]), id_column)
+    counts_gene_cols, _ = split_expression_columns(counts_df.drop(columns=list(HARMONIZED_ID_COLUMNS)), id_column)
+    normalized_gene_cols, _ = split_expression_columns(normalized_df.drop(columns=list(HARMONIZED_ID_COLUMNS)), id_column)
 
     counts_missing_by_column = summarize_missing_by_column(counts_df, "counts")
     metadata_missing_by_column = summarize_missing_by_column(metadata_df, "metadata")
@@ -518,26 +647,17 @@ def main() -> None:
     )
     processed_expression, scaling_method = scale_expression(processed_expression, selected_gene_cols, args.scale_method)
 
-    merge_candidate_rows = int(
-        processed_expression["_harmonized_id"].isin(metadata_df["_harmonized_id"]).sum()
+    merged_df, unmatched_expression_ids, unmatched_metadata_ids, merge_strategy, merge_candidate_rows = merge_expression_with_metadata(
+        processed_expression,
+        metadata_df,
+        id_column,
     )
-    unmatched_expression_ids = processed_expression.loc[
-        ~processed_expression["_harmonized_id"].isin(metadata_df["_harmonized_id"]), [id_column, "_harmonized_id"]
-    ].copy()
-    unmatched_metadata_ids = metadata_df.loc[
-        ~metadata_df["_harmonized_id"].isin(processed_expression["_harmonized_id"]), [id_column, "_harmonized_id"]
-    ].copy()
-
-    merged_df = processed_expression.merge(
-        metadata_df.drop(columns=[id_column]),
-        on="_harmonized_id",
-        how="inner",
-        validate="one_to_one",
-        suffixes=("", "_metadata"),
+    print(f"Merge strategy used: {merge_strategy}")
+    print(
+        f"Matched samples after merge: {len(merged_df)} | "
+        f"Unmatched expression samples: {len(unmatched_expression_ids)} | "
+        f"Unmatched metadata samples: {len(unmatched_metadata_ids)}"
     )
-    merged_df = merged_df.rename(columns={f"{id_column}_x": id_column}) if f"{id_column}_x" in merged_df.columns else merged_df
-    if id_column not in merged_df.columns:
-        merged_df[id_column] = merged_df["_harmonized_id"]
 
     label_column = detect_label_column(metadata_df, id_column, args.label_column)
 
@@ -576,6 +696,7 @@ def main() -> None:
                 "expression_rows",
                 "metadata_rows",
                 "merge_candidate_rows",
+                "merge_strategy",
                 "merged_rows",
                 "gene_feature_count",
                 "encoded_metadata_feature_count",
@@ -591,6 +712,7 @@ def main() -> None:
                 len(processed_expression),
                 len(metadata_df),
                 merge_candidate_rows,
+                merge_strategy,
                 len(merged_df),
                 len(selected_gene_cols),
                 len(encoded_metadata_cols),
