@@ -1,82 +1,242 @@
 # C-A_esophageal
 
-This repository contains a reusable preprocessing pipeline for the TCGA ESCA gene expression and clinical metadata files used in downstream deep learning experiments.
+## Project overview
 
-## Files
+This repository implements a staged TCGA ESCA analysis workflow for tumor-vs-normal modeling.
+The study is organized as:
 
-- `preprocess_esca.py`: End-to-end preprocessing script for loading, inspecting, cleaning, scaling, merging, filtering, and exporting ESCA datasets plus train/test splits.
+1. **Stage I:** cohort curation and preprocessing.
+2. **Stage II:** deep invariant sparse modeling.
+3. **Stage III:** candidate driver prioritization and downstream validation.
 
-## Expected inputs
+Step 3 is the bridge between Stage I and Stage II. It establishes a leakage-safe, patient-grouped, manuscript-grade baseline benchmarking framework before the sparse invariant adversarial model is introduced.
 
-Place these CSV files in the repository root, or pass explicit paths on the command line:
+## Pipeline overview
+
+1. **Step 1 – generic preprocessing scaffold:** reusable loading, harmonization, scaling, and exploratory train/test export utilities.
+2. **Step 2 – curated primary cohort construction:** explicit tumor-vs-normal label creation, aligned primary matrices, and grouped outer-fold creation.
+3. **Step 3 – grouped nested baseline benchmarking:** grouped nested cross-validation, strong baseline classifiers, pooled out-of-fold predictions, subgroup analyses, and publication-grade figures.
+4. **Step 4 – next planned step:** sparse invariant adversarial model training on the curated Step 2 cohort with the grouped evaluation backbone defined in Step 3.
+
+## Figure Style Standard
+
+All figures in this project must follow the shared publication rules below.
+
+- **SVG is mandatory** for primary figure export.
+- **All text must be bold**.
+- **Roman/serif fonts only** with preferred order: Times New Roman → Times → STIXGeneral → DejaVu Serif.
+- **Reuse `publication_style.py`** for plotting configuration and figure saving.
+- **Use the shared Nature-style palette** from `publication_style.py` rather than local ad hoc colors.
+- Keep figures manuscript-ready: compact legends, thicker axes, minimal chart junk, balanced whitespace, and editable SVG text where possible.
+
+## Project structure suggestion
+
+```text
+C-A_esophageal/
+├── preprocess_esca.py
+├── step2_build_cohort.py
+├── step3_grouped_baselines.py
+├── publication_style.py
+├── README.md
+└── outputs/
+    ├── step1_preprocess/
+    ├── step2_cohort/
+    └── step3_baselines/
+```
+
+## Dependency notes
+
+Core dependencies:
+
+- Python 3.10+
+- pandas
+- numpy
+- scikit-learn
+- matplotlib
+
+Optional Step 3 accelerators:
+
+- xgboost
+- lightgbm
+
+If XGBoost and LightGBM are unavailable, Step 3 automatically falls back to `HistGradientBoostingClassifier`, so the benchmark remains runnable in a clean environment.
+
+## Step 1 – generic preprocessing scaffold
+
+### Purpose
+
+Step 1 provides a reusable preprocessing scaffold for loading counts, metadata, and normalized matrices; harmonizing identifiers; cleaning missing values; scaling features; and exporting generic modeling tables.
+
+### Key inputs
 
 - `TCGA_ESCA_STAR_Counts.csv`
 - `TCGA_ESCA_Metadata.csv`
 - `ESCA_vst_normalized_matrix.csv`
 
-## What the script does
+### Main logic
 
-1. Loads all three CSV files into pandas DataFrames and prints previews for initial inspection.
-2. Detects when counts or normalized expression files are stored as gene-by-sample matrices and automatically transposes them into sample-by-gene format.
-3. Detects a shared identifier column automatically, or uses `--id-column` when provided.
-4. Harmonizes TCGA-style identifiers so metadata and expression tables can merge even when one file uses sample-level barcodes and another uses patient-level barcodes.
-5. Reports missingness by dataset and by column.
-6. Imputes missing numeric gene expression values with per-gene means.
-7. Cleans metadata by dropping rows with excessive missingness and imputing remaining numeric/categorical fields with median/mode strategies.
-8. Uses the normalized matrix when available; otherwise it falls back to counts and applies `log2(x + 1)` normalization when needed.
-9. Optionally keeps only the top percentage of genes ranked by variance.
-10. Scales gene features using z-score normalization or min-max scaling.
-11. Detects sample outliers using the maximum absolute z-score across gene features and removes them when they exceed the chosen threshold.
-12. Auto-detects a label column (or uses `--label-column`), one-hot encodes remaining metadata features, and exports train/test splits.
-13. Saves cleaned intermediate tables, merge diagnostics, outlier summaries, the merged modeling dataset, and train/test outputs.
+- Reads counts, metadata, and normalized matrices.
+- Detects and harmonizes sample identifiers.
+- Handles gene-by-sample vs sample-by-gene orientation.
+- Imputes missing values and applies optional scaling.
+- Detects a label column automatically if requested.
+- Exports a generic sample-level train/test split.
 
-## Usage
+### Outputs
+
+Representative Step 1 outputs include:
+
+- `TCGA_ESCA_preprocessed.csv`
+- `TCGA_ESCA_X_train.csv`
+- `TCGA_ESCA_X_test.csv`
+- `TCGA_ESCA_y_train.csv`
+- `TCGA_ESCA_y_test.csv`
+- missingness, outlier, and unmatched-ID diagnostics
+
+### Example command
 
 ```bash
 python preprocess_esca.py \
   --counts TCGA_ESCA_STAR_Counts.csv \
   --metadata TCGA_ESCA_Metadata.csv \
   --normalized ESCA_vst_normalized_matrix.csv \
-  --output-dir processed \
-  --label-column vital_status \
-  --gene-top-percent 10 \
-  --scale-method zscore
+  --output-dir outputs/step1_preprocess
 ```
 
-### Optional arguments
+### Study design note
 
-- `--id-column`: explicitly set the common identifier column. Auto-detection ignores index-like columns such as `Unnamed: 0` unless they are the only plausible shared identifiers after any needed expression-table transpose.
-- `--label-column`: explicitly choose the target label from metadata.
-- `--metadata-missing-threshold`: maximum allowed row-wise metadata missing fraction before a row is dropped. Default: `0.5`.
-- `--zscore-threshold`: threshold for sample-level outlier removal. Default: `3.5`.
-- `--scale-method`: choose `none`, `zscore`, or `minmax` feature scaling. Default: `zscore`.
-- `--test-size`: fraction of merged samples reserved for testing. Default: `0.2`.
-- `--random-state`: random seed for the train/test split. Default: `42`.
-- `--force-log2-normalization`: force `log2(x + 1)` normalization even when the selected expression matrix already looks normalized.
+Step 1 is a **generic scaffold only**. Its auto-detected label column logic and plain `train_test_split` exports are useful for exploratory preprocessing but are **not** the final leakage-safe training source for the TCGA ESCA tumor-vs-normal study.
 
-## Outputs
+## Step 2 – curated primary cohort construction
 
-The script writes the following files into the output directory:
+### Purpose
 
-- `TCGA_ESCA_counts_imputed.csv`
-- `TCGA_ESCA_metadata_cleaned.csv`
-- `TCGA_ESCA_expression_processed.csv`
-- `TCGA_ESCA_preprocessed.csv`
-- `TCGA_ESCA_X_train.csv`
-- `TCGA_ESCA_X_test.csv`
-- `TCGA_ESCA_y_train.csv`
-- `TCGA_ESCA_y_test.csv`
-- `TCGA_ESCA_train_dataset.csv`
-- `TCGA_ESCA_test_dataset.csv`
-- `TCGA_ESCA_missing_summary.csv`
-- `TCGA_ESCA_missing_by_column.csv`
-- `TCGA_ESCA_metadata_imputation_summary.csv`
-- `TCGA_ESCA_outlier_summary.csv`
-- `TCGA_ESCA_unmatched_expression_ids.csv`
-- `TCGA_ESCA_unmatched_metadata_ids.csv`
-- `TCGA_ESCA_preprocessing_summary.csv`
+Step 2 converts the generic preprocessing scaffold into a study-grounded primary cohort with explicit tumor-vs-normal labels and leakage-safe grouped outer folds.
 
-## Notes
+### Key inputs
 
-- The repository currently does **not** include the TCGA CSV inputs, so you will need to add them locally before running the pipeline.
-- If `merged_rows` was previously reported as `0`, inspect `TCGA_ESCA_unmatched_expression_ids.csv` and `TCGA_ESCA_unmatched_metadata_ids.csv`; the harmonized identifier workflow is designed to surface and fix barcode alignment issues.
+- `TCGA_ESCA_STAR_Counts.csv`
+- `ESCA_vst_normalized_matrix.csv`
+- `TCGA_ESCA_Metadata.csv`
+
+### Main logic
+
+- Harmonizes TCGA identifiers across all input tables.
+- Restricts the cohort to supported primary tumor and solid tissue normal samples.
+- Creates explicit binary labels: tumor = 1, normal = 0.
+- Builds curated metadata fields for downstream subgroup analyses.
+- Selects one representative primary sample per patient for grouped evaluation.
+- Generates patient-grouped outer folds for later nested cross-validation.
+- Exports aligned primary normalized and counts matrices.
+
+### Outputs
+
+- `master_samples_primary.csv`
+- `normalized_primary_matrix.csv`
+- `counts_primary_matrix.csv`
+- `grouped_outer_folds.csv`
+- cohort QC figures in SVG format
+
+### Example command
+
+```bash
+python step2_build_cohort.py \
+  --counts TCGA_ESCA_STAR_Counts.csv \
+  --normalized ESCA_vst_normalized_matrix.csv \
+  --metadata TCGA_ESCA_Metadata.csv \
+  --output-dir outputs/step2_cohort
+```
+
+### Leakage prevention note
+
+Step 2 is the **true modeling entry point** for later stages. Step 3 and future model-training steps must consume the curated Step 2 cohort and grouped folds instead of the generic Step 1 train/test split.
+
+## Step 3 – grouped nested baseline benchmarking
+
+### Purpose
+
+Step 3 benchmarks strong baseline classifiers for TCGA ESCA tumor-vs-normal classification using the curated Step 2 primary cohort and the normalized primary expression matrix. It provides the grouped nested cross-validation backbone that later sparse invariant modeling will inherit.
+
+### Key inputs
+
+- `outputs/step2_cohort/master_samples_primary.csv`
+- `outputs/step2_cohort/normalized_primary_matrix.csv`
+- `outputs/step2_cohort/grouped_outer_folds.csv`
+
+### Main logic
+
+- Uses **explicit** `disease_label` values from Step 2 rather than auto-detected labels.
+- Aligns the normalized matrix to the curated primary cohort by `sample_id`.
+- Restricts evaluation to samples shared across the cohort table, normalized matrix, and grouped fold file.
+- Enforces **patient-grouped outer folds only** using the precomputed Step 2 fold assignments.
+- Builds grouped inner CV within each outer training split for leakage-safe tuning.
+- Applies feature filtering, variable-gene selection, imputation, and z-score scaling using **training data only** inside each outer fold.
+- Benchmarks these strong baseline models:
+  - `LR_L1`
+  - `LR_ElasticNet`
+  - `RandomForest`
+  - `XGBoost` if requested and installed
+  - `LightGBM` if requested and available when XGBoost is not used
+  - `HistGB` as the mandatory clean-environment fallback
+  - `MLP` optionally via `--run-mlp`
+- Saves fold metrics, pooled out-of-fold predictions, subgroup summaries, calibration data, and manuscript-grade SVG figures.
+- Selects a baseline reference winner using AUROC first, then AUPRC, balanced accuracy, MCC, calibration, and stability.
+
+### Outputs
+
+- `baseline_fold_metrics.csv`
+- `baseline_summary_metrics.csv`
+- `baseline_oof_predictions.csv`
+- `baseline_subgroup_metrics.csv`
+- `model_selection_log.csv`
+- `baseline_feature_space_summary.csv`
+- `calibration_data.csv`
+- `run_config.json`
+- optional saved fold models when `--save-fold-models` is enabled
+- SVG figures including:
+  - `figure4_baseline_roc.svg`
+  - `figure4_baseline_pr.svg`
+  - `figure4_baseline_performance_bar.svg`
+  - `figure4_calibration.svg`
+  - `figure4_subgroup_performance.svg`
+  - `figure4_confusion_summary.svg`
+  - `figure4_fold_distribution.svg`
+
+### Example command
+
+```bash
+python step3_grouped_baselines.py \
+  --cohort outputs/step2_cohort/master_samples_primary.csv \
+  --normalized outputs/step2_cohort/normalized_primary_matrix.csv \
+  --folds outputs/step2_cohort/grouped_outer_folds.csv \
+  --output-dir outputs/step3_baselines \
+  --random-seeds 42,52,62,72,82 \
+  --inner-folds 3 \
+  --run-mlp \
+  --run-xgboost
+```
+
+### Leakage prevention note
+
+Step 3 explicitly forbids the following:
+
+- no sample-level random train/test split
+- no patient overlap between train and validation/test partitions
+- no preprocessing fitted on outer test data
+- no variable-gene selection using outer test data
+- no hyperparameter tuning on outer test data
+- no metadata leakage into the default expression-only model inputs
+
+### What Step 3 intentionally does not implement yet
+
+The following are intentionally **out of scope** at Step 3:
+
+- sparse invariant adversarial modeling
+- attribution and perturbation analysis
+- differential expression
+- enrichment analysis
+- candidate driver prioritization and validation
+
+## Step 4 – next planned step
+
+Step 4 will implement the **sparse invariant adversarial model** on top of the curated Step 2 cohort and the grouped evaluation backbone created in Step 3.
