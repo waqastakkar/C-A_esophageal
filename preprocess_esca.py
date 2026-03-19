@@ -127,16 +127,22 @@ def normalize_identifier_value(value: object) -> str | None:
 
 def ensure_unique_identifier_column(df: pd.DataFrame, id_column: str) -> pd.DataFrame:
     result = df.copy()
-    matching_columns = [col for col in result.columns if col == id_column]
-    if not matching_columns:
+    matching_positions = [idx for idx, col in enumerate(result.columns) if col == id_column]
+    if not matching_positions:
         raise KeyError(f"Identifier column '{id_column}' not found.")
-    if len(matching_columns) == 1:
-        result[id_column] = result[id_column].astype("string")
+
+    identifier_values = result.iloc[:, matching_positions].astype("string")
+    if len(matching_positions) == 1:
+        result.iloc[:, matching_positions[0]] = identifier_values.iloc[:, 0]
         return result
 
-    duplicate_values = result.loc[:, matching_columns].astype("string")
-    rowwise_unique = duplicate_values.apply(
-        lambda row: {value for value in row.dropna() if str(value).strip()},
+    rowwise_unique = identifier_values.apply(
+        lambda row: {
+            normalized if normalized is not None else str(value).strip()
+            for value in row.dropna()
+            if str(value).strip()
+            for normalized in [normalize_identifier_value(value)]
+        },
         axis=1,
     )
     conflicting_rows = rowwise_unique.map(len) > 1
@@ -146,11 +152,12 @@ def ensure_unique_identifier_column(df: pd.DataFrame, id_column: str) -> pd.Data
             f"{int(conflicting_rows.sum())} rows. Remove duplicate identifier columns from the input data."
         )
 
-    resolved_identifier = duplicate_values.bfill(axis=1).iloc[:, 0].astype("string")
-    result = result.loc[:, ~result.columns.duplicated(keep="first")].copy()
-    result[id_column] = resolved_identifier
+    resolved_identifier = identifier_values.bfill(axis=1).iloc[:, 0].astype("string")
+    keep_mask = ~result.columns.duplicated(keep="first")
+    result = result.loc[:, keep_mask].copy()
+    result.iloc[:, result.columns.get_loc(id_column)] = resolved_identifier
     print(
-        f"Resolved {len(matching_columns)} duplicated '{id_column}' columns by keeping the first non-missing value per row."
+        f"Resolved {len(matching_positions)} duplicated '{id_column}' columns by keeping the first non-missing value per row."
     )
     return result
 
