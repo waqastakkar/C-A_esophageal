@@ -125,9 +125,38 @@ def normalize_identifier_value(value: object) -> str | None:
     return normalized
 
 
-def add_harmonized_identifier(df: pd.DataFrame, id_column: str) -> pd.DataFrame:
+def ensure_unique_identifier_column(df: pd.DataFrame, id_column: str) -> pd.DataFrame:
     result = df.copy()
-    result[id_column] = result[id_column].astype("string")
+    matching_columns = [col for col in result.columns if col == id_column]
+    if not matching_columns:
+        raise KeyError(f"Identifier column '{id_column}' not found.")
+    if len(matching_columns) == 1:
+        result[id_column] = result[id_column].astype("string")
+        return result
+
+    duplicate_values = result.loc[:, matching_columns].astype("string")
+    rowwise_unique = duplicate_values.apply(
+        lambda row: {value for value in row.dropna() if str(value).strip()},
+        axis=1,
+    )
+    conflicting_rows = rowwise_unique.map(len) > 1
+    if conflicting_rows.any():
+        raise ValueError(
+            f"Identifier column '{id_column}' appears multiple times with conflicting values in "
+            f"{int(conflicting_rows.sum())} rows. Remove duplicate identifier columns from the input data."
+        )
+
+    resolved_identifier = duplicate_values.bfill(axis=1).iloc[:, 0].astype("string")
+    result = result.loc[:, ~result.columns.duplicated(keep="first")].copy()
+    result[id_column] = resolved_identifier
+    print(
+        f"Resolved {len(matching_columns)} duplicated '{id_column}' columns by keeping the first non-missing value per row."
+    )
+    return result
+
+
+def add_harmonized_identifier(df: pd.DataFrame, id_column: str) -> pd.DataFrame:
+    result = ensure_unique_identifier_column(df, id_column)
     result["_harmonized_id"] = result[id_column].map(normalize_identifier_value).astype("string")
     return result
 
