@@ -17,17 +17,18 @@ Place these CSV files in the repository root, or pass explicit paths on the comm
 ## What the script does
 
 1. Loads all three CSV files into pandas DataFrames and prints previews for initial inspection.
-2. Detects a shared identifier column automatically, or uses `--id-column` when provided.
-3. Harmonizes TCGA-style identifiers so metadata and expression tables can merge even when one file uses sample-level barcodes and another uses patient-level barcodes.
-4. Reports missingness by dataset and by column.
-5. Imputes missing numeric gene expression values with per-gene means.
-6. Cleans metadata by dropping rows with excessive missingness and imputing remaining numeric/categorical fields with median/mode strategies.
-7. Uses the normalized matrix when available; otherwise it falls back to counts and applies `log2(x + 1)` normalization when needed.
-8. Optionally keeps only the top percentage of genes ranked by variance.
-9. Scales gene features using z-score normalization or min-max scaling.
-10. Detects sample outliers using the maximum absolute z-score across gene features and removes them when they exceed the chosen threshold.
-11. Auto-detects a label column (or uses `--label-column`), one-hot encodes remaining metadata features, and exports train/test splits.
-12. Saves cleaned intermediate tables, merge diagnostics, outlier summaries, the merged modeling dataset, and train/test outputs.
+2. Detects when counts or normalized expression files are stored as gene-by-sample matrices and automatically transposes them into sample-by-gene format.
+3. Detects a shared identifier column automatically, or uses `--id-column` when provided.
+4. Harmonizes TCGA-style identifiers so metadata and expression tables can merge even when one file uses sample-level barcodes and another uses patient-level barcodes.
+5. Reports missingness by dataset and by column.
+6. Imputes missing numeric gene expression values with per-gene means.
+7. Cleans metadata by dropping rows with excessive missingness and imputing remaining numeric/categorical fields with median/mode strategies.
+8. Uses the normalized matrix when available; otherwise it falls back to counts and applies `log2(x + 1)` normalization when needed.
+9. Optionally keeps only the top percentage of genes ranked by variance.
+10. Scales gene features using z-score normalization or min-max scaling.
+11. Detects sample outliers using the maximum absolute z-score across gene features and removes them when they exceed the chosen threshold.
+12. Auto-detects a label column (or uses `--label-column`), one-hot encodes remaining metadata features, and exports train/test splits.
+13. Saves cleaned intermediate tables, merge diagnostics, outlier summaries, the merged modeling dataset, and train/test outputs.
 
 ## Usage
 
@@ -44,7 +45,7 @@ python preprocess_esca.py \
 
 ### Optional arguments
 
-- `--id-column`: explicitly set the common identifier column. Auto-detection ignores index-like columns such as `Unnamed: 0`.
+- `--id-column`: explicitly set the common identifier column. Auto-detection ignores index-like columns such as `Unnamed: 0` unless they are the only plausible shared identifiers after any needed expression-table transpose.
 - `--label-column`: explicitly choose the target label from metadata.
 - `--metadata-missing-threshold`: maximum allowed row-wise metadata missing fraction before a row is dropped. Default: `0.5`.
 - `--zscore-threshold`: threshold for sample-level outlier removal. Default: `3.5`.

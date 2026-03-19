@@ -132,6 +132,42 @@ def add_harmonized_identifier(df: pd.DataFrame, id_column: str) -> pd.DataFrame:
     return result
 
 
+def looks_like_sample_identifier(value: object) -> bool:
+    normalized = normalize_identifier_value(value)
+    return bool(normalized and normalized.startswith("TCGA-"))
+
+
+def maybe_transpose_expression_table(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or len(df.columns) < 3:
+        return df
+
+    first_column = df.columns[0]
+    other_columns = [col for col in df.columns[1:] if looks_like_sample_identifier(col)]
+    if len(other_columns) < max(3, len(df.columns[1:]) // 2):
+        return df
+
+    transposed = df.set_index(first_column).transpose().reset_index()
+    transposed = transposed.rename(columns={"index": "sample_id"})
+    transposed.columns = [str(col).strip() for col in transposed.columns]
+    print(
+        "Detected gene-by-sample expression matrix; transposed to sample-by-gene format "
+        f"using '{first_column}' as the feature identifier column."
+    )
+    return transposed
+
+
+def canonicalize_sample_identifier_column(df: pd.DataFrame) -> pd.DataFrame:
+    result = df.copy()
+    for column in result.columns:
+        if column == 'sample_id':
+            return result
+        if is_unnamed_column(column) and looks_like_identifier_series(result[column]):
+            result = result.rename(columns={column: 'sample_id'})
+            print(f"Renamed '{column}' to 'sample_id' based on TCGA-style identifier values.")
+            return result
+    return result
+
+
 def is_unnamed_column(column_name: object) -> bool:
     return bool(re.match(r"^unnamed:\s*\d+$", str(column_name).strip(), flags=re.IGNORECASE))
 
@@ -410,9 +446,13 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    counts_df = normalize_column_names(load_csv(args.counts))
-    metadata_df = normalize_column_names(load_csv(args.metadata))
-    normalized_df = normalize_column_names(load_csv(args.normalized))
+    counts_df = canonicalize_sample_identifier_column(
+        maybe_transpose_expression_table(normalize_column_names(load_csv(args.counts)))
+    )
+    metadata_df = canonicalize_sample_identifier_column(normalize_column_names(load_csv(args.metadata)))
+    normalized_df = canonicalize_sample_identifier_column(
+        maybe_transpose_expression_table(normalize_column_names(load_csv(args.normalized)))
+    )
 
     id_column = detect_identifier((counts_df, metadata_df, normalized_df), args.id_column)
     print(f"\nUsing common identifier column: {id_column}")
