@@ -44,7 +44,7 @@ python preprocess_esca.py \
 
 ### Optional arguments
 
-- `--id-column`: explicitly set the common identifier column.
+- `--id-column`: explicitly set the common identifier column. Auto-detection ignores index-like columns such as `Unnamed: 0`.
 - `--label-column`: explicitly choose the target label from metadata.
 - `--metadata-missing-threshold`: maximum allowed row-wise metadata missing fraction before a row is dropped. Default: `0.5`.
 - `--zscore-threshold`: threshold for sample-level outlier removal. Default: `3.5`.
