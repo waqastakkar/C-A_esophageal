@@ -136,6 +136,32 @@ def is_unnamed_column(column_name: object) -> bool:
     return bool(re.match(r"^unnamed:\s*\d+$", str(column_name).strip(), flags=re.IGNORECASE))
 
 
+def looks_like_identifier_series(series: pd.Series) -> bool:
+    non_missing = series.dropna()
+    if non_missing.empty:
+        return False
+
+    normalized = non_missing.map(normalize_identifier_value).dropna()
+    if normalized.empty:
+        return False
+
+    uniqueness_ratio = normalized.nunique(dropna=True) / len(normalized)
+    if uniqueness_ratio < 0.8:
+        return False
+
+    has_identifier_pattern = normalized.astype(str).str.contains(r"[A-Z]", regex=True).any()
+    if has_identifier_pattern:
+        return True
+
+    numeric_values = pd.to_numeric(non_missing, errors="coerce")
+    if numeric_values.notna().all():
+        sorted_values = numeric_values.sort_values(ignore_index=True)
+        if len(sorted_values) > 1 and sorted_values.diff().dropna().eq(1).all():
+            return False
+
+    return True
+
+
 def detect_identifier(dfs: Iterable[pd.DataFrame], user_choice: str | None = None) -> str:
     dfs = tuple(dfs)
     if user_choice:
@@ -151,6 +177,17 @@ def detect_identifier(dfs: Iterable[pd.DataFrame], user_choice: str | None = Non
             return candidate
     if len(valid_shared) == 1:
         return next(iter(valid_shared))
+
+    unnamed_shared = sorted(col for col in shared if is_unnamed_column(col))
+    if len(unnamed_shared) == 1:
+        unnamed_candidate = unnamed_shared[0]
+        if all(looks_like_identifier_series(df[unnamed_candidate]) for df in dfs):
+            print(
+                "Falling back to shared index-like identifier column "
+                f"'{unnamed_candidate}' because its values look like sample identifiers."
+            )
+            return unnamed_candidate
+
     raise KeyError(
         "Unable to auto-detect a common identifier column after excluding index-like columns. "
         f"Shared columns were: {sorted(shared)}. Use --id-column explicitly."
