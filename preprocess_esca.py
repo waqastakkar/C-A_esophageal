@@ -94,7 +94,7 @@ def parse_args() -> argparse.Namespace:
         "--zscore-threshold",
         type=float,
         default=3.5,
-        help="Drop samples whose maximum absolute per-gene z-score exceeds this value.",
+        help="Threshold used when computing the per-sample fraction of genes with extreme absolute z-scores.",
     )
     parser.add_argument(
         "--force-log2-normalization",
@@ -520,28 +520,41 @@ def select_high_variance_genes(df: pd.DataFrame, gene_cols: list[str], top_perce
 
 def build_outlier_summary(df: pd.DataFrame, gene_cols: list[str], z_threshold: float) -> tuple[pd.DataFrame, pd.Series]:
     if not gene_cols:
-        empty = pd.DataFrame(columns=["_harmonized_id", "max_abs_zscore", "is_outlier"])
+        empty = pd.DataFrame(columns=["_harmonized_id", "extreme_fraction", "is_outlier"])
         return empty, pd.Series(dtype=float)
 
     values = df[gene_cols].astype(float)
     std = values.std(axis=0, ddof=0).replace(0, np.nan)
     zscores = ((values - values.mean(axis=0)) / std).abs().fillna(0.0)
-    max_abs_z = zscores.max(axis=1)
+    extreme_fraction = (zscores > z_threshold).mean(axis=1)
     summary = pd.DataFrame(
         {
             "_harmonized_id": df["_harmonized_id"],
-            "max_abs_zscore": max_abs_z,
-            "is_outlier": max_abs_z > z_threshold,
+            "extreme_fraction": extreme_fraction,
+            "is_outlier": extreme_fraction > 0.01,
         }
     )
-    return summary, max_abs_z
+    return summary, extreme_fraction
 
 
 def remove_outliers(df: pd.DataFrame, gene_cols: list[str], z_threshold: float) -> tuple[pd.DataFrame, pd.DataFrame]:
-    summary, max_abs_z = build_outlier_summary(df, gene_cols, z_threshold)
+    rows_before = len(df)
+    summary, extreme_fraction = build_outlier_summary(df, gene_cols, z_threshold)
     if summary.empty:
+        print(f"Rows before outlier removal: {rows_before}")
+        print(f"Rows after outlier removal: {rows_before}")
+        print("Samples removed during outlier removal: 0")
         return df.copy(), summary
-    filtered = df.loc[max_abs_z <= z_threshold].copy()
+    filtered = df.loc[extreme_fraction <= 0.01].copy()
+    rows_after = len(filtered)
+    removed_count = rows_before - rows_after
+    print(f"Rows before outlier removal: {rows_before}")
+    print(f"Rows after outlier removal: {rows_after}")
+    print(f"Samples removed during outlier removal: {removed_count}")
+    if rows_before > 0 and rows_after == 0:
+        raise ValueError(
+            "Outlier filtering removed all merged samples. Adjust the outlier threshold or review the normalized expression matrix."
+        )
     return filtered, summary
 
 
@@ -742,7 +755,7 @@ def main() -> None:
         ignore_index=True,
     ).to_csv(output_dir / "TCGA_ESCA_missing_by_column.csv", index=False)
     metadata_imputation_summary.to_csv(output_dir / "TCGA_ESCA_metadata_imputation_summary.csv", index=False)
-    outlier_summary.sort_values("max_abs_zscore", ascending=False).to_csv(
+    outlier_summary.sort_values("extreme_fraction", ascending=False).to_csv(
         output_dir / "TCGA_ESCA_outlier_summary.csv", index=False
     )
     unmatched_expression_ids.to_csv(output_dir / "TCGA_ESCA_unmatched_expression_ids.csv", index=False)
