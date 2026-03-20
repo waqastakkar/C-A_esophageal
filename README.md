@@ -8,7 +8,7 @@ This repository implements a staged TCGA ESCA tumor-vs-normal modeling workflow 
 2. **Stage II — Deep invariant sparse modeling**
 3. **Stage III — Candidate driver prioritization and downstream validation**
 
-Step 4 is now the main Stage II implementation. It trains a compact, leakage-safe **Sparse Invariant Adversarial Autoencoder-Classifier** on the curated Step 2 cohort, evaluates it with grouped nested cross-validation consistent with Step 3, and exports interpretable gate weights, latent representations, and manuscript-grade figures.
+Step 5 is now the first major Stage III implementation. It converts the Step 4 deep invariant sparse model outputs into a careful, computationally grounded **Candidate Driver Priority Score (CDPS)** framework that ranks genes using multiple evidence channels without claiming causal proof.
 
 ## Pipeline overview
 
@@ -16,7 +16,8 @@ Step 4 is now the main Stage II implementation. It trains a compact, leakage-saf
 2. **Step 2 – curated primary cohort construction**
 3. **Step 3 – grouped nested baseline benchmarking**
 4. **Step 4 – sparse invariant adversarial deep disease model**
-5. **Step 5 – next planned step: stability, attribution, perturbation, and CDPS gene ranking**
+5. **Step 5 – candidate driver prioritization with CDPS**
+6. **Step 6 – next planned step: biological/statistical validation with raw counts, enrichment, networks, and clinicopathologic analyses**
 
 ## Figure Style Standard
 
@@ -28,6 +29,7 @@ All figures in this project must follow the shared publication rules below.
 - **Reuse `publication_style.py`** for plotting configuration and figure saving.
 - **Use the shared Nature-style palette** from `publication_style.py` rather than local ad hoc colors.
 - Keep figures manuscript-ready: compact legends, thicker axes, minimal chart junk, balanced whitespace, and editable SVG text where possible.
+- These rules remain mandatory for **all future steps** in the project.
 
 ## Suggested project structure
 
@@ -37,6 +39,7 @@ C-A_esophageal/
 ├── step2_build_cohort.py
 ├── step3_grouped_baselines.py
 ├── step4_sparse_invariant_model.py
+├── step5_cdps_ranking.py
 ├── deep_model_utils.py
 ├── publication_style.py
 ├── README.md
@@ -44,7 +47,8 @@ C-A_esophageal/
     ├── step1_preprocess/
     ├── step2_cohort/
     ├── step3_baselines/
-    └── step4_deep_model/
+    ├── step4_deep_model/
+    └── step5_cdps/
 ```
 
 ## Dependency notes
@@ -54,17 +58,21 @@ Core dependencies:
 - Python 3.10+
 - pandas
 - numpy
+- scipy
 - scikit-learn
 - matplotlib
-- **PyTorch** for Step 4 deep modeling
+- **PyTorch**
 
 Optional dependencies:
 
 - `xgboost`
 - `lightgbm`
-- `umap-learn` for latent-space visualization in Step 4
+- `umap-learn`
+- pathway GMT file inputs for lightweight pathway support in Step 5
 
-If `umap-learn` is unavailable, Step 4 falls back to PCA for the latent-space figures.
+If optional packages or artifacts are unavailable, the pipeline degrades gracefully and records the limitation in saved outputs and console logs.
+
+---
 
 ## Step 1 – generic preprocessing scaffold
 
@@ -97,12 +105,18 @@ Provides reusable loading, harmonization, scaling, and exploratory export utilit
 ### Example command
 
 ```bash
-python preprocess_esca.py   --counts TCGA_ESCA_STAR_Counts.csv   --metadata TCGA_ESCA_Metadata.csv   --normalized ESCA_vst_normalized_matrix.csv   --output-dir outputs/step1_preprocess
+python preprocess_esca.py \
+  --counts TCGA_ESCA_STAR_Counts.csv \
+  --metadata TCGA_ESCA_Metadata.csv \
+  --normalized ESCA_vst_normalized_matrix.csv \
+  --output-dir outputs/step1_preprocess
 ```
 
-### Leakage/study-design note
+### Leakage / study-design note
 
-Step 1 is a **generic scaffold only**. Its auto-detected labels and sample-level split are not the final training design for the study.
+Step 1 is a **generic scaffold only**. Its auto-detected labels and plain sample-level split are not the final training design for the study.
+
+---
 
 ## Step 2 – curated primary cohort construction
 
@@ -137,12 +151,18 @@ Builds the study-grounded primary tumor-vs-normal cohort and the grouped outer f
 ### Example command
 
 ```bash
-python step2_build_cohort.py   --counts TCGA_ESCA_STAR_Counts.csv   --normalized ESCA_vst_normalized_matrix.csv   --metadata TCGA_ESCA_Metadata.csv   --output-dir outputs/step2_cohort
+python step2_build_cohort.py \
+  --counts TCGA_ESCA_STAR_Counts.csv \
+  --normalized ESCA_vst_normalized_matrix.csv \
+  --metadata TCGA_ESCA_Metadata.csv \
+  --output-dir outputs/step2_cohort
 ```
 
-### Leakage/study-design note
+### Leakage / study-design note
 
-Step 2 is the **true entry point** for all later model training and grouped evaluation.
+Step 2 is the **true entry point** for all later model training and grouped evaluation. Grouped folds prevent patient overlap between train and outer-test partitions.
+
+---
 
 ## Step 3 – grouped nested baseline benchmarking
 
@@ -180,29 +200,28 @@ Benchmarks grouped nested baseline classifiers on the curated Step 2 cohort befo
 ### Example command
 
 ```bash
-python step3_grouped_baselines.py   --cohort outputs/step2_cohort/master_samples_primary.csv   --normalized outputs/step2_cohort/normalized_primary_matrix.csv   --folds outputs/step2_cohort/grouped_outer_folds.csv   --output-dir outputs/step3_baselines   --random-seeds 42,52,62,72,82   --inner-folds 3   --run-mlp   --run-xgboost
+python step3_grouped_baselines.py \
+  --cohort outputs/step2_cohort/master_samples_primary.csv \
+  --normalized outputs/step2_cohort/normalized_primary_matrix.csv \
+  --folds outputs/step2_cohort/grouped_outer_folds.csv \
+  --output-dir outputs/step3_baselines \
+  --random-seeds 42,52,62,72,82 \
+  --inner-folds 3 \
+  --run-mlp \
+  --run-xgboost
 ```
 
-### Leakage/study-design note
+### Leakage / study-design note
 
 Step 3 forbids sample-level random splits, patient overlap across partitions, outer-test-informed preprocessing, and metadata leakage into the default expression-only predictive input.
+
+---
 
 ## Step 4 – sparse invariant adversarial deep disease model
 
 ### Purpose
 
 Implements the main Stage II disease model for this study: a **Sparse Invariant Adversarial Autoencoder-Classifier** for TCGA ESCA tumor-vs-normal classification.
-
-### Why this is the main model
-
-Step 4 combines:
-
-- a **sparse feature gate** for interpretable gene-level weighting,
-- a compact **encoder** that maps normalized expression into a disease-relevant latent space,
-- a **classifier** for the primary tumor-vs-normal endpoint,
-- a **decoder** to preserve latent structure via reconstruction,
-- **confounder adversary heads** with gradient reversal to reduce latent confounder signal,
-- an **environment risk-variance penalty** to encourage stable classification behavior across metadata-defined environments.
 
 ### Key inputs
 
@@ -220,86 +239,241 @@ Step 4 combines:
 - Selects variable genes using **training data only inside each outer fold**.
 - Fits imputers/scalers using **training statistics only**.
 - Uses grouped inner validation for modest hyperparameter selection and early stopping.
-- Trains a compact PyTorch model with these loss components:
-  - classification loss
-  - reconstruction loss
-  - sparsity loss on the gate
-  - adversarial confounder loss
-  - invariance penalty across environments
+- Trains a compact PyTorch model with classification, reconstruction, sparsity, adversarial, and environment-invariance objectives.
 - Exports out-of-fold predictions, fold metrics, training histories, latent embeddings, gate weights, environment summaries, and baseline-vs-deep comparisons.
 - Saves manuscript-grade SVG figures through `publication_style.py`.
 
-### Confounder adversary use
-
-The adversary heads predict available confounder/environment labels such as sex, smoking, histology, stage, and country/region from the latent representation. Gradient reversal pushes the encoder toward representations that remain predictive of disease while being less confounder-dominated.
-
-### Invariance penalty use
-
-The invariance component penalizes variance in environment-wise classification risk across usable metadata-defined environments. This encourages more stable disease prediction across available strata while skipping missing or too-small groups gracefully.
-
-### Sparse gate role
-
-The sparse gate is applied directly to normalized gene-expression inputs before encoding. It provides per-gene weights, supports sparsity regularization, and exports interpretable gate-weight tables for later Step 5 stability/attribution/CDPS work.
-
 ### Outputs
 
-Expected Step 4 outputs include:
-
-- `deep_fold_metrics.csv`
-- `deep_summary_metrics.csv`
 - `deep_oof_predictions.csv`
-- `deep_training_history.csv`
-- `deep_model_selection_log.csv`
 - `gate_weights.csv`
-- `latent_embeddings.csv` when enabled
+- `latent_embeddings.csv`
+- `deep_summary_metrics.csv`
+- `deep_fold_metrics.csv`
+- `deep_training_history.csv`
 - `environment_performance.csv`
 - `invariance_summary.csv`
-- `baseline_vs_deep_comparison.csv`
-- `run_config.json`
-- optional fold checkpoints
-- manuscript-grade Step 4 SVG figures such as:
-  - `figure5_deep_vs_baselines.svg`
-  - `figure5_deep_roc.svg`
-  - `figure5_deep_pr.svg`
-  - `figure5_calibration.svg`
-  - `figure5_latent_space_tumor_normal.svg`
-  - `figure5_latent_space_histology.svg`
-  - `figure5_latent_space_smoking.svg`
-  - `figure5_gate_weight_distribution.svg`
-  - `figure5_top_gate_genes.svg`
-  - `figure5_environment_robustness.svg`
-  - optional `figure5_training_dynamics.svg`
+- optional fold checkpoints in `models/`
+- Step 4 SVG figures
 
 ### Example command
 
 ```bash
-python step4_sparse_invariant_model.py   --cohort outputs/step2_cohort/master_samples_primary.csv   --normalized outputs/step2_cohort/normalized_primary_matrix.csv   --folds outputs/step2_cohort/grouped_outer_folds.csv   --baseline-summary outputs/step3_baselines/baseline_summary_metrics.csv   --baseline-oof outputs/step3_baselines/baseline_oof_predictions.csv   --output-dir outputs/step4_deep_model   --random-seeds 42,52,62,72,82   --inner-folds 3   --latent-dim 32   --top-variable-genes 5000   --save-latent-embeddings   --run-umap
+python step4_sparse_invariant_model.py \
+  --cohort outputs/step2_cohort/master_samples_primary.csv \
+  --normalized outputs/step2_cohort/normalized_primary_matrix.csv \
+  --folds outputs/step2_cohort/grouped_outer_folds.csv \
+  --baseline-summary outputs/step3_baselines/baseline_summary_metrics.csv \
+  --baseline-oof outputs/step3_baselines/baseline_oof_predictions.csv \
+  --output-dir outputs/step4_deep_model \
+  --random-seeds 42,52,62,72,82 \
+  --save-fold-models \
+  --save-latent-embeddings
 ```
 
-### Leakage/study-design note
+### Leakage / study-design note
 
-Step 4 preserves the study’s critical grouped evaluation rules:
+Step 4 preserves fold separation and does **not** refit using outer-test data. Attribution or interpretability work in later steps must operate on the already trained fold models rather than retraining on the full cohort.
 
-- no sample-level random splits,
-- no patient overlap between outer train and outer test,
-- no preprocessing fitted on outer test data,
-- no variable-gene selection using outer test data,
-- no early stopping on outer test data,
-- no confounder/environment encoding used from outer test during training.
+---
 
-### What Step 4 intentionally defers to Step 5 and later
+## Step 5 – candidate driver prioritization with CDPS
 
-Step 4 does **not** yet implement:
+### Purpose
 
-- final CDPS aggregation/ranking,
-- stability ranking and perturbation integration,
-- differential expression validation,
-- pathway enrichment,
-- pathway/network analysis,
-- claims of biological causality.
+Implements the first major Stage III module: computational prioritization of **candidate driver genes** using evidence from the Step 4 deep invariant sparse model.
 
-Instead, Step 4 provides a confounder-aware disease model and interpretable intermediate outputs that are designed to feed the later candidate-driver prioritization stage.
+### What CDPS is
 
-## Step 5 – planned next step
+The **Candidate Driver Priority Score (CDPS)** is a configurable, multi-component prioritization score that integrates:
 
-Step 5 will focus on **stability, attribution, perturbation, and CDPS gene ranking** using the Step 4 model outputs, while still keeping final DE/enrichment/pathway validation as separate downstream tasks.
+1. **Predictive importance** from deep-model attribution.
+2. **Model-derived sparsity support** from gate weights.
+3. **Selection stability** across folds, seeds, and bootstrap resamples.
+4. **Environment consistency / invariance** across metadata-defined subgroups.
+5. **In silico perturbation impact** within the learned disease model.
+
+CDPS is a **computational prioritization score**, not a causal proof score. The Step 5 outputs should be interpreted as rankings of candidate driver-associated genes or putative disease-promoting genes with stable disease-linked effects in the learned model.
+
+### Why the score is multi-component
+
+Single-method rankings can be dominated by one unstable run or one modeling artifact. Step 5 therefore combines complementary signals so that highly ranked genes are supported by both predictive evidence and reproducibility-oriented evidence.
+
+### Key inputs
+
+Required:
+
+- `outputs/step2_cohort/master_samples_primary.csv`
+- `outputs/step2_cohort/normalized_primary_matrix.csv`
+- `outputs/step2_cohort/grouped_outer_folds.csv`
+- `outputs/step4_deep_model/deep_oof_predictions.csv`
+- `outputs/step4_deep_model/gate_weights.csv`
+- `outputs/step4_deep_model/deep_summary_metrics.csv`
+- `outputs/step4_deep_model/models/` for fold checkpoints when attribution/perturbation are desired
+
+Optional:
+
+- `outputs/step4_deep_model/latent_embeddings.csv`
+- `outputs/step4_deep_model/deep_training_history.csv`
+- gene annotation table
+- pathway GMT file for lightweight pathway-level support summaries
+
+### Main logic
+
+#### 1. Attribution
+
+Step 5 computes per-gene importance using:
+
+- **Integrated Gradients**
+- **Gradient × Input**
+- **Gate-weight evidence** from Step 4
+
+If full attribution across all fold models is too expensive, the script uses a **reproducible class-balanced sample cap per fold/seed** and records the analysis settings in `run_config.json`.
+
+#### 2. Selection stability
+
+Step 5 quantifies reproducibility across runs using:
+
+- top-25 and top-100 selection frequency
+- mean rank and rank variability
+- coefficient-of-variation style spread
+- bootstrap resampling of run-level evidence to obtain CDPS uncertainty intervals
+
+#### 3. Environment invariance
+
+Step 5 evaluates whether gene-level effects remain present across available metadata-defined environments such as:
+
+- sex
+- smoking
+- histology
+- stage
+- country/region
+
+The current implementation summarizes environment coverage, mean subgroup effect, subgroup variability, and worst-versus-best subgroup gaps. This rewards genes that remain active across environments instead of being driven by a single stratum.
+
+#### 4. In silico perturbation
+
+For top-ranked genes, Step 5 performs counterfactual perturbation within the learned Step 4 disease model:
+
+- tumor samples are shifted toward a normal-like reference value
+- normal samples are shifted toward a tumor-like reference value
+- predicted disease probability is recomputed
+- latent movement is summarized when latent output is available from the loaded model
+
+This is reported as **counterfactual impact within the learned disease model**, not as causal intervention proof.
+
+#### 5. Composite ranking
+
+By default, Step 5 combines normalized components as:
+
+```text
+CDPS =
+  0.30 * attribution_score
++ 0.20 * gate_score
++ 0.20 * stability_score
++ 0.15 * invariance_score
++ 0.15 * perturbation_score
+```
+
+The weights are CLI-configurable.
+
+#### 6. Pathway-level support summary
+
+If a pathway GMT file is provided, Step 5 builds a lightweight ranking-oriented pathway table containing:
+
+- pathway gene count among ranked genes
+- top-25 and top-100 hit counts
+- mean CDPS
+- mean attribution support
+- mean perturbation support
+
+This is **not** a formal enrichment test; full biological validation is deferred to Step 6.
+
+### Outputs
+
+Core tables:
+
+- `gene_attribution_summary.csv`
+- `samplewise_attributions.csv` when `--save-samplewise-attributions` is used
+- `gate_importance_summary.csv`
+- `gene_stability_summary.csv`
+- `bootstrap_ranking_summary.csv`
+- `gene_invariance_summary.csv`
+- `environment_gene_effects.csv`
+- `gene_perturbation_summary.csv`
+- `perturbation_samplewise.csv`
+- `ranked_genes_cdps.csv`
+- `top25_genes_cdps.csv`
+- `top100_genes_cdps.csv`
+- `pathway_ranking_summary.csv` when pathway mode is enabled
+- `latent_perturbation_summary.csv` when latent support is available
+- `run_config.json`
+
+Figures (all SVG, publication-style):
+
+- `figure6_cdps_top_genes.svg`
+- `figure6_stability_heatmap.svg`
+- `figure6_attribution_vs_perturbation.svg`
+- `figure6_cdps_components.svg`
+- `figure6_environment_consistency.svg`
+- `figure6_counterfactual_perturbation.svg`
+- `figure6_pathway_summary.svg` when pathway mode is enabled
+- `figure6_latent_shift.svg` when latent-shift summaries are available
+
+### Example command
+
+```bash
+python step5_cdps_ranking.py \
+  --cohort outputs/step2_cohort/master_samples_primary.csv \
+  --normalized outputs/step2_cohort/normalized_primary_matrix.csv \
+  --folds outputs/step2_cohort/grouped_outer_folds.csv \
+  --deep-oof outputs/step4_deep_model/deep_oof_predictions.csv \
+  --gate-weights outputs/step4_deep_model/gate_weights.csv \
+  --latent-embeddings outputs/step4_deep_model/latent_embeddings.csv \
+  --deep-metrics outputs/step4_deep_model/deep_summary_metrics.csv \
+  --deep-model-dir outputs/step4_deep_model/models \
+  --output-dir outputs/step5_cdps \
+  --bootstrap-repeats 100 \
+  --top-genes-for-perturbation 100 \
+  --top-genes-for-detailed-report 25 \
+  --save-samplewise-attributions \
+  --run-pathway-summary
+```
+
+### Leakage / study-design note
+
+Step 5 does **not** retrain or retune the Step 4 model. It operates fold-by-fold on already trained Step 4 artifacts and aggregates evidence afterward. Bootstrap resampling is applied to the evidence summaries rather than fitting new models on relabeled data.
+
+### What Step 5 intentionally does **not** claim
+
+Step 5 does **not** claim:
+
+- proven biological causality
+- that observational RNA-seq alone establishes true driver genes
+- that counterfactual model perturbation is equivalent to real intervention
+
+Use careful language such as:
+
+- candidate driver genes
+- computationally prioritized driver-associated genes
+- genes with stable disease-linked effects
+- counterfactual impact within the learned disease model
+
+### What is intentionally deferred to Step 6
+
+Step 6 will perform the heavier biological/statistical validation work, including:
+
+- differential expression validation on raw counts
+- formal enrichment testing
+- pathway/network analysis
+- survival or stage association testing
+- clinicopathologic validation
+- external validation where available
+
+Those items are **not yet implemented in Step 5**.
+
+---
+
+## Next step: Step 6
+
+The next planned module is **biological/statistical validation with raw counts and pathway/network/clinicopathologic analyses**. It will take the Step 5 ranked candidate lists and test their support using downstream validation analyses rather than extending the predictive model itself.
