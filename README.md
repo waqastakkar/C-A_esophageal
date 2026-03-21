@@ -481,43 +481,6 @@ The next planned module is **biological/statistical validation with raw counts a
 
 ---
 
-## Step 12 – reproducibility, release, and archival packaging
-
-### Purpose
-
-Step 12 creates the final reproducibility and release bundle for the study by validating previously generated artifacts, copying them into a deterministic package layout, generating a machine-readable manifest, computing checksums, capturing an environment snapshot, and optionally producing compressed archives for handoff or archival use.
-
-### Key behavior
-
-- Reads all Step-12 settings from `config.yaml` under the `script_12` section.
-- Validates required package assets before packaging proceeds.
-- Builds the release bundle under `release_package/`.
-- Generates `release_manifest.csv`, `checksums.txt`, `environment_snapshot.txt`, `directory_tree.txt`, `README_RELEASE.md`, and `RUNBOOK.md`.
-- Writes the Step-12 JSON summary report to `reports/12_reproducibility_and_release_report.json`.
-- Saves the exact config snapshot to `configs_used/12_package_reproducibility_and_release_config.yaml`.
-- Optionally creates release archives in `release_archives/`.
-- Packages the project outputs only; it does **not** retrain models, reevaluate benchmarks, or regenerate scientific results.
-
-### Main outputs
-
-- `release_package/`
-- `release_package/release_manifest.csv`
-- `release_package/checksums.txt`
-- `release_package/environment_snapshot.txt`
-- `release_package/directory_tree.txt`
-- `release_package/README_RELEASE.md`
-- `release_package/RUNBOOK.md`
-- `reports/12_reproducibility_and_release_report.json`
-- `logs/12_package_reproducibility_and_release_<timestamp>.log`
-- `configs_used/12_package_reproducibility_and_release_config.yaml`
-- `release_archives/kinase_causality_qsar_release.tar.gz` when archive creation is enabled
-
-### Example command
-
-```bash
-python scripts/12_package_reproducibility_and_release.py --config config.yaml
-```
-
 ### Reproducibility note
 
 Step 12 is a packaging and archival step only. It preserves path consistency and provenance by copying validated upstream outputs into a release-ready structure and recording manifest/checksum metadata for later verification.
